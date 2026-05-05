@@ -238,8 +238,8 @@ export async function fetchWhoopSleep(
 
   try {
     const [sleepRes, recRes] = await Promise.all([
-      fetch(`${WHOOP_API_BASE}/v1/activity/sleep?${range}&limit=10`, { headers }),
-      fetch(`${WHOOP_API_BASE}/v1/recovery?${range}&limit=10`, { headers }),
+      fetch(`${WHOOP_API_BASE}/v2/activity/sleep?${range}&limit=10`, { headers }),
+      fetch(`${WHOOP_API_BASE}/v2/recovery?${range}&limit=10`, { headers }),
     ])
 
     type WhoopSleepRecord = {
