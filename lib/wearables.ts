@@ -266,6 +266,9 @@ export async function fetchWhoopSleep(
       created_at?: string
     }
 
+    if (!sleepRes.ok) console.error('Whoop sleep API non-OK:', sleepRes.status, await sleepRes.text())
+    if (!recRes.ok) console.error('Whoop recovery API non-OK:', recRes.status, await recRes.text())
+
     const sleepJson = sleepRes.ok
       ? ((await sleepRes.json()) as { records?: WhoopSleepRecord[] })
       : null
@@ -273,11 +276,15 @@ export async function fetchWhoopSleep(
       ? ((await recRes.json()) as { records?: WhoopRecoveryRecord[] })
       : null
 
-    // Find the most recent sleep that ended on `date`
-    const sleeps = sleepJson?.records ?? []
-    const target = sleeps
-      .filter((s) => s.end && s.end.startsWith(date))
-      .sort((a, b) => (a.end! > b.end! ? -1 : 1))[0]
+    const sleeps = (sleepJson?.records ?? []).filter((s) => !!s.end)
+    console.log(`[whoop] ${sleeps.length} sleep records, looking for end on ${date}`)
+
+    // Prefer the sleep that ended on `date`; fall back to the most recent
+    // overall (so we always return data when Whoop has any).
+    const sleepsByDate = sleeps.filter((s) => s.end!.startsWith(date))
+    const sortedByEnd = sleeps.sort((a, b) => (a.end! > b.end! ? -1 : 1))
+    const target = sleepsByDate[0] ?? sortedByEnd[0]
+    console.log(`[whoop] target sleep:`, target?.end ?? 'none')
 
     const s = target?.score?.stage_summary
     const totalInBedMs = s?.total_in_bed_time_milli ?? 0
