@@ -11,7 +11,11 @@ import {
 // 8:00 AM America/New_York — schedule with cron-job.org using the TZ field
 // Pulls sleep + recovery from Oura and Whoop and messages a summary.
 export async function GET(req: NextRequest) {
-  if (req.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`) {
+  const headerOk =
+    req.headers.get('authorization') === `Bearer ${process.env.CRON_SECRET}`
+  const tokenOk =
+    new URL(req.url).searchParams.get('token') === process.env.CRON_SECRET
+  if (!headerOk && !tokenOk) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

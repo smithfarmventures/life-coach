@@ -33,6 +33,28 @@ export interface ExerciseLog {
   raw_input: string
 }
 
+export interface OuraData {
+  total_sleep_hours: number | null
+  rem_hours: number | null
+  deep_hours: number | null
+  efficiency: number | null
+  sleep_score: number | null
+  readiness_score: number | null
+  bedtime_start: string | null
+  bedtime_end: string | null
+}
+
+export interface WhoopData {
+  total_sleep_hours: number | null
+  rem_hours: number | null
+  deep_hours: number | null
+  efficiency: number | null
+  performance: number | null
+  recovery: number | null
+  hrv_ms: number | null
+  resting_hr: number | null
+}
+
 export interface DailyCheck {
   id: string
   user_id: string
@@ -45,6 +67,8 @@ export interface DailyCheck {
   sleep_hours: number | null
   sleep_quality: string | null
   wind_down_confirmed: boolean
+  oura_data: OuraData | null
+  whoop_data: WhoopData | null
 }
 
 export interface WeeklySummary {
