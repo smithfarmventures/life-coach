@@ -11,6 +11,8 @@ import {
   getTodayExerciseLogs,
   getWeekFoodLogs,
   getTodayChecks,
+  getCRMFollowupsDue,
+  getCRMOverdueContacts,
 } from '@/lib/db'
 import type { WorkoutDay } from '@/types'
 import DashboardClient from './dashboard-client'
@@ -54,6 +56,8 @@ export default async function Home({ searchParams }: PageProps) {
     todayEx,
     weekFood,
     dailyCheck,
+    crmFollowups,
+    crmOverdue,
   ] = await Promise.all([
     getWeeklyMenu(user.id, weekStart),
     getWeeklyWorkoutPlan(user.id, weekStart),
@@ -64,6 +68,8 @@ export default async function Home({ searchParams }: PageProps) {
     getTodayExerciseLogs(user.id, today),
     getWeekFoodLogs(user.id, weekStart, weekEnd),
     getTodayChecks(user.id, today),
+    getCRMFollowupsDue().catch(() => []),
+    getCRMOverdueContacts(30).catch(() => []),
   ])
 
   const workoutsPlanned = (plan?.plan ?? []).filter(
@@ -88,10 +94,12 @@ export default async function Home({ searchParams }: PageProps) {
 
   return (
     <DashboardClient
+      token={token!}
       data={{
         user: { name: user.name, timezone: user.timezone },
         today: {
           date: fmtDate(today),
+          todayRaw: today,
           weekOf: fmtDate(weekStart),
           calories: Math.round(macros.cals),
           protein: Math.round(macros.p),
@@ -111,6 +119,7 @@ export default async function Home({ searchParams }: PageProps) {
         weekFood,
         menu: menu ? { options: menu.options, chosen: menu.chosen } : null,
         workoutPlan: plan?.plan ?? null,
+        crm: { followups: crmFollowups, overdue: crmOverdue },
       }}
     />
   )
