@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getAllUsers, upsertDailyCheck } from '@/lib/db'
+import { getAllUsers, upsertDailyCheck, getWeekFoodLogs } from '@/lib/db'
 import { parseFood } from '@/lib/ai-parser'
 import { createClient } from '@supabase/supabase-js'
 import type { FoodLog } from '@/types'
@@ -11,6 +11,22 @@ function db() {
 function authCheck(req: NextRequest): boolean {
   const token = req.headers.get('x-token') ?? new URL(req.url).searchParams.get('token')
   return !!process.env.CRON_SECRET && token === process.env.CRON_SECRET
+}
+
+export async function GET(req: NextRequest) {
+  if (!authCheck(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const url = new URL(req.url)
+  const from = url.searchParams.get('from')
+  const to = url.searchParams.get('to')
+  if (!from || !to) return NextResponse.json({ error: 'from and to required' }, { status: 400 })
+
+  const users = await getAllUsers()
+  const user = users.find((u) => u.telegram_chat_id) ?? users[0]
+  if (!user) return NextResponse.json({ error: 'No user' }, { status: 404 })
+
+  const logs = await getWeekFoodLogs(user.id, from, to)
+  return NextResponse.json({ logs, timezone: user.timezone })
 }
 
 export async function POST(req: NextRequest) {

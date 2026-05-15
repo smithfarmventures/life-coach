@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import type { OuraData, WhoopData, MenuOption, WorkoutDay, FoodLog, ExerciseLog } from '@/types'
 
 interface CRMFollowup {
+  id: string
   name: string
   company: string | null
   description: string
@@ -11,9 +12,16 @@ interface CRMFollowup {
 }
 
 interface CRMContact {
+  id: string
   name: string
   company: string | null
   last_contact_date: string | null
+}
+
+interface CRMPersonItem {
+  id: string
+  name: string
+  company: string | null
 }
 
 export interface DashboardData {
@@ -58,8 +66,47 @@ const TAB_LABELS: Record<Tab, string> = {
   crm: 'CRM',
 }
 
+function groupByDate(logs: FoodLog[], tz: string): Array<{ date: string; label: string; logs: FoodLog[] }> {
+  const map = new Map<string, FoodLog[]>()
+  for (const log of logs) {
+    const date = new Date(log.logged_at).toLocaleDateString('en-CA', { timeZone: tz })
+    if (!map.has(date)) map.set(date, [])
+    map.get(date)!.push(log)
+  }
+  return Array.from(map.entries())
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .map(([date, dayLogs]) => ({
+      date,
+      label: new Date(date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
+      logs: dayLogs,
+    }))
+}
+
 export default function DashboardClient({ data, token }: { data: DashboardData; token: string }) {
   const [activeTab, setActiveTab] = useState<Tab>('overview')
+
+  const [historyFrom, setHistoryFrom] = useState(() => {
+    const d = new Date(data.today.todayRaw)
+    d.setDate(d.getDate() - 13)
+    return d.toISOString().split('T')[0]
+  })
+  const [historyTo, setHistoryTo] = useState(data.today.todayRaw)
+  const [historyLogs, setHistoryLogs] = useState<FoodLog[] | null>(null)
+  const [historyLoading, setHistoryLoading] = useState(false)
+
+  async function loadHistory(e: React.FormEvent) {
+    e.preventDefault()
+    setHistoryLoading(true)
+    try {
+      const res = await fetch(`/api/log/food?from=${historyFrom}&to=${historyTo}`, {
+        headers: { 'x-token': token },
+      })
+      const d = await res.json()
+      setHistoryLogs(d.logs ?? [])
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
 
   useEffect(() => {
     const id = setInterval(() => window.location.reload(), 5 * 60 * 1000)
@@ -233,6 +280,43 @@ export default function DashboardClient({ data, token }: { data: DashboardData; 
                 </ul>
               )}
             </Card>
+            <Card>
+              <SectionLabel>Browse history</SectionLabel>
+              <form onSubmit={loadHistory} style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
+                <input
+                  type="date"
+                  value={historyFrom}
+                  onChange={(e) => setHistoryFrom(e.target.value)}
+                  style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 13, fontFamily: 'inherit', background: '#f8fafc' }}
+                />
+                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>to</span>
+                <input
+                  type="date"
+                  value={historyTo}
+                  onChange={(e) => setHistoryTo(e.target.value)}
+                  style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 13, fontFamily: 'inherit', background: '#f8fafc' }}
+                />
+                <button
+                  type="submit"
+                  disabled={historyLoading}
+                  style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: 'var(--accent)', color: 'white', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer', opacity: historyLoading ? 0.6 : 1 }}
+                >
+                  {historyLoading ? 'Loading…' : 'Load'}
+                </button>
+              </form>
+              {historyLogs !== null && (
+                historyLogs.length === 0
+                  ? <EmptyState icon="🍽️" text="No meals logged in this range" />
+                  : groupByDate(historyLogs, data.user.timezone).map(({ date, label, logs }) => (
+                    <div key={date} style={{ marginTop: 14 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 2 }}>{label}</div>
+                      <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+                        {logs.map((f) => <MealRow key={f.id} f={f} tz={data.user.timezone} />)}
+                      </ul>
+                    </div>
+                  ))
+              )}
+            </Card>
           </div>
         )}
 
@@ -293,7 +377,7 @@ export default function DashboardClient({ data, token }: { data: DashboardData; 
         {activeTab === 'log' && <LogTab token={token} todayRaw={data.today.todayRaw} />}
 
         {/* CRM TAB */}
-        {activeTab === 'crm' && <CRMTab followups={data.crm.followups} overdue={data.crm.overdue} />}
+        {activeTab === 'crm' && <CRMTab initialFollowups={data.crm.followups} initialOverdue={data.crm.overdue} token={token} />}
 
         <p style={{ textAlign: 'center', fontSize: 11, color: 'var(--text-muted)', marginTop: 24 }}>
           Auto-refresh every 5 min · Crons via Vercel
@@ -522,41 +606,106 @@ function LogTab({ token, todayRaw }: { token: string; todayRaw: string }) {
 
 // ─── CRM Tab ─────────────────────────────────────────────────────────────────
 
-function CRMTab({ followups, overdue }: { followups: CRMFollowup[]; overdue: CRMContact[] }) {
-  const empty = followups.length === 0 && overdue.length === 0
+function CRMTab({ initialFollowups, initialOverdue, token }: {
+  initialFollowups: CRMFollowup[]
+  initialOverdue: CRMContact[]
+  token: string
+}) {
+  const [followups, setFollowups] = useState(initialFollowups)
+  const [overdue, setOverdue] = useState(initialOverdue)
+  const [people, setPeople] = useState<CRMPersonItem[]>([])
+
+  const [showAddContact, setShowAddContact] = useState(false)
+  const [showLogInteraction, setShowLogInteraction] = useState(false)
+  const [showAddFollowup, setShowAddFollowup] = useState(false)
+
+  const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  useEffect(() => {
+    fetch(`/api/crm?token=${token}`)
+      .then((r) => r.json())
+      .then((d) => {
+        setPeople(d.people ?? [])
+        setFollowups(d.followups ?? [])
+        setOverdue(d.overdue ?? [])
+      })
+  }, [token])
+
+  async function postCRM(body: object) {
+    const res = await fetch('/api/crm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-token': token },
+      body: JSON.stringify(body),
+    })
+    return res.json()
+  }
+
+  async function refreshCRM() {
+    const d = await fetch(`/api/crm?token=${token}`).then((r) => r.json())
+    setPeople(d.people ?? [])
+    setFollowups(d.followups ?? [])
+    setOverdue(d.overdue ?? [])
+  }
+
+  function flash(ok: boolean, text: string) {
+    setActionMsg({ ok, text })
+    setTimeout(() => setActionMsg(null), 3000)
+  }
+
+  async function completeDone(followupId: string) {
+    setFollowups((f) => f.filter((x) => x.id !== followupId))
+    const r = await postCRM({ action: 'complete_followup', followup_id: followupId })
+    if (!r.ok) { flash(false, r.error ?? 'Failed'); refreshCRM() }
+  }
+
+  const inputS: React.CSSProperties = { width: '100%', padding: '9px 11px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 13, fontFamily: 'inherit', background: '#f8fafc', boxSizing: 'border-box' }
+  const selectS: React.CSSProperties = { ...inputS, cursor: 'pointer' }
+  const btnS: React.CSSProperties = { padding: '9px 18px', borderRadius: 8, border: 'none', background: 'var(--accent)', color: 'white', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer' }
+  const btnGhostS: React.CSSProperties = { ...btnS, background: 'transparent', color: 'var(--accent)', border: '1px solid var(--accent)' }
 
   return (
     <div className="fade-up">
+
+      {/* Follow-ups due */}
       <Card>
         <SectionLabel>Follow-ups due</SectionLabel>
         {followups.length === 0 ? (
           <EmptyState icon="✅" text="No follow-ups due in the next 7 days" />
         ) : (
           <ul style={{ margin: '12px 0 0', padding: 0, listStyle: 'none' }}>
-            {followups.map((f, i) => (
-              <li key={i} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                  <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)' }}>
-                    {f.name}{f.company ? <span style={{ fontWeight: 400, color: 'var(--text-secondary)' }}> · {f.company}</span> : null}
-                  </span>
-                  {f.due_date && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{f.due_date}</span>}
+            {followups.map((f) => (
+              <li key={f.id} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                  <div>
+                    <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)' }}>
+                      {f.name}{f.company ? <span style={{ fontWeight: 400, color: 'var(--text-secondary)' }}> · {f.company}</span> : null}
+                    </span>
+                    {f.due_date && <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 6 }}>{f.due_date}</span>}
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{f.description}</div>
+                  </div>
+                  <button
+                    onClick={() => completeDone(f.id)}
+                    style={{ flexShrink: 0, padding: '4px 10px', borderRadius: 6, border: '1px solid #bbf7d0', background: '#f0fdf4', color: '#15803d', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer' }}
+                  >
+                    Done ✓
+                  </button>
                 </div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{f.description}</div>
               </li>
             ))}
           </ul>
         )}
       </Card>
 
+      {/* Reach out */}
       <Card>
         <SectionLabel>Reach out</SectionLabel>
         <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '4px 0 8px' }}>No contact in 30+ days</p>
         {overdue.length === 0 ? (
-          <EmptyState icon="🎉" text="You're all caught up" />
+          <EmptyState icon="🎉" text="You&apos;re all caught up" />
         ) : (
           <ul style={{ margin: '8px 0 0', padding: 0, listStyle: 'none' }}>
-            {overdue.map((c, i) => (
-              <li key={i} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
+            {overdue.map((c) => (
+              <li key={c.id} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
                 <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)' }}>
                   {c.name}{c.company ? <span style={{ fontWeight: 400, color: 'var(--text-secondary)' }}> · {c.company}</span> : null}
                 </div>
@@ -569,15 +718,187 @@ function CRMTab({ followups, overdue }: { followups: CRMFollowup[]; overdue: CRM
         )}
       </Card>
 
-      {empty && (
-        <Card>
-          <p style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', padding: '8px 0' }}>
-            CRM is empty — add contacts via Telegram:<br />
-            <span style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--text-secondary)' }}>&quot;Add Sarah Chen, partner at a16z&quot;</span>
-          </p>
-        </Card>
+      {/* Action buttons */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+        <button onClick={() => { setShowAddContact((v) => !v); setShowLogInteraction(false); setShowAddFollowup(false) }} style={showAddContact ? btnS : btnGhostS}>+ Add contact</button>
+        <button onClick={() => { setShowLogInteraction((v) => !v); setShowAddContact(false); setShowAddFollowup(false) }} style={showLogInteraction ? btnS : btnGhostS}>+ Log interaction</button>
+        <button onClick={() => { setShowAddFollowup((v) => !v); setShowAddContact(false); setShowLogInteraction(false) }} style={showAddFollowup ? btnS : btnGhostS}>+ Add follow-up</button>
+      </div>
+
+      {actionMsg && (
+        <div style={{ marginBottom: 12, padding: '10px 14px', borderRadius: 8, background: actionMsg.ok ? '#f0fdf4' : '#fef2f2', border: `1px solid ${actionMsg.ok ? '#bbf7d0' : '#fecaca'}`, fontSize: 13, color: actionMsg.ok ? '#166534' : '#991b1b' }}>
+          {actionMsg.text}
+        </div>
+      )}
+
+      {/* Add contact form */}
+      {showAddContact && (
+        <AddContactForm
+          inputS={inputS} btnS={btnS}
+          onSave={async (fields) => {
+            const r = await postCRM({ action: 'add_person', ...fields })
+            if (r.ok) { flash(true, `${fields.name} added`); setShowAddContact(false); refreshCRM() }
+            else flash(false, r.error ?? 'Failed')
+          }}
+          onCancel={() => setShowAddContact(false)}
+        />
+      )}
+
+      {/* Log interaction form */}
+      {showLogInteraction && (
+        <LogInteractionForm
+          people={people} inputS={inputS} selectS={selectS} btnS={btnS}
+          onSave={async (fields) => {
+            const r = await postCRM({ action: 'log_interaction', ...fields })
+            if (r.ok) { flash(true, 'Interaction logged'); setShowLogInteraction(false); refreshCRM() }
+            else flash(false, r.error ?? 'Failed')
+          }}
+          onCancel={() => setShowLogInteraction(false)}
+        />
+      )}
+
+      {/* Add follow-up form */}
+      {showAddFollowup && (
+        <AddFollowupForm
+          people={people} inputS={inputS} selectS={selectS} btnS={btnS}
+          onSave={async (fields) => {
+            const r = await postCRM({ action: 'add_followup', ...fields })
+            if (r.ok) { flash(true, 'Follow-up added'); setShowAddFollowup(false); refreshCRM() }
+            else flash(false, r.error ?? 'Failed')
+          }}
+          onCancel={() => setShowAddFollowup(false)}
+        />
       )}
     </div>
+  )
+}
+
+function AddContactForm({ inputS, btnS, onSave, onCancel }: {
+  inputS: React.CSSProperties
+  btnS: React.CSSProperties
+  onSave: (fields: { name: string; company?: string; role?: string; relationship_type?: string; notes?: string }) => Promise<void>
+  onCancel: () => void
+}) {
+  const [name, setName] = useState('')
+  const [company, setCompany] = useState('')
+  const [role, setRole] = useState('')
+  const [relType, setRelType] = useState('')
+  const [notes, setNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!name.trim()) return
+    setSaving(true)
+    await onSave({ name, company: company || undefined, role: role || undefined, relationship_type: relType || undefined, notes: notes || undefined })
+    setSaving(false)
+  }
+
+  return (
+    <Card>
+      <SectionLabel>New contact</SectionLabel>
+      <form onSubmit={handleSubmit} style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <input placeholder="Name *" value={name} onChange={(e) => setName(e.target.value)} style={inputS} required />
+        <input placeholder="Company" value={company} onChange={(e) => setCompany(e.target.value)} style={inputS} />
+        <input placeholder="Role / title" value={role} onChange={(e) => setRole(e.target.value)} style={inputS} />
+        <input placeholder="Relationship type (e.g. investor, friend)" value={relType} onChange={(e) => setRelType(e.target.value)} style={inputS} />
+        <textarea placeholder="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} style={{ ...inputS, resize: 'vertical' }} />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button type="submit" disabled={saving || !name.trim()} style={{ ...btnS, opacity: saving || !name.trim() ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Save'}</button>
+          <button type="button" onClick={onCancel} style={{ ...btnS, background: '#f1f5f9', color: 'var(--text-secondary)' }}>Cancel</button>
+        </div>
+      </form>
+    </Card>
+  )
+}
+
+function LogInteractionForm({ people, inputS, selectS, btnS, onSave, onCancel }: {
+  people: CRMPersonItem[]
+  inputS: React.CSSProperties
+  selectS: React.CSSProperties
+  btnS: React.CSSProperties
+  onSave: (fields: { person_id: string; type: string; notes?: string }) => Promise<void>
+  onCancel: () => void
+}) {
+  const [personId, setPersonId] = useState('')
+  const [type, setType] = useState('call')
+  const [notes, setNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!personId) return
+    setSaving(true)
+    await onSave({ person_id: personId, type, notes: notes || undefined })
+    setSaving(false)
+  }
+
+  return (
+    <Card>
+      <SectionLabel>Log interaction</SectionLabel>
+      <form onSubmit={handleSubmit} style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <select value={personId} onChange={(e) => setPersonId(e.target.value)} style={selectS} required>
+          <option value="">Select person *</option>
+          {people.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}{p.company ? ` · ${p.company}` : ''}</option>
+          ))}
+        </select>
+        <select value={type} onChange={(e) => setType(e.target.value)} style={selectS}>
+          <option value="call">Call</option>
+          <option value="email">Email</option>
+          <option value="meeting">Meeting</option>
+          <option value="text">Text</option>
+          <option value="other">Other</option>
+        </select>
+        <textarea placeholder="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} style={{ ...inputS, resize: 'vertical' }} />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button type="submit" disabled={saving || !personId} style={{ ...btnS, opacity: saving || !personId ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Save'}</button>
+          <button type="button" onClick={onCancel} style={{ ...btnS, background: '#f1f5f9', color: 'var(--text-secondary)' }}>Cancel</button>
+        </div>
+      </form>
+    </Card>
+  )
+}
+
+function AddFollowupForm({ people, inputS, selectS, btnS, onSave, onCancel }: {
+  people: CRMPersonItem[]
+  inputS: React.CSSProperties
+  selectS: React.CSSProperties
+  btnS: React.CSSProperties
+  onSave: (fields: { person_id: string; description: string; due_date?: string }) => Promise<void>
+  onCancel: () => void
+}) {
+  const [personId, setPersonId] = useState('')
+  const [description, setDescription] = useState('')
+  const [dueDate, setDueDate] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!personId || !description.trim()) return
+    setSaving(true)
+    await onSave({ person_id: personId, description, due_date: dueDate || undefined })
+    setSaving(false)
+  }
+
+  return (
+    <Card>
+      <SectionLabel>Add follow-up</SectionLabel>
+      <form onSubmit={handleSubmit} style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <select value={personId} onChange={(e) => setPersonId(e.target.value)} style={selectS} required>
+          <option value="">Select person *</option>
+          {people.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}{p.company ? ` · ${p.company}` : ''}</option>
+          ))}
+        </select>
+        <input placeholder="What to follow up on *" value={description} onChange={(e) => setDescription(e.target.value)} style={inputS} required />
+        <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} style={{ ...inputS, cursor: 'text' }} />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button type="submit" disabled={saving || !personId || !description.trim()} style={{ ...btnS, opacity: saving || !personId || !description.trim() ? 0.6 : 1 }}>{saving ? 'Saving…' : 'Save'}</button>
+          <button type="button" onClick={onCancel} style={{ ...btnS, background: '#f1f5f9', color: 'var(--text-secondary)' }}>Cancel</button>
+        </div>
+      </form>
+    </Card>
   )
 }
 

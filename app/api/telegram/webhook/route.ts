@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { sendMessage, type TelegramUpdate } from '@/lib/telegram'
-import { detectIntent, parseFood, parseExercise } from '@/lib/ai-parser'
+import { detectIntent, parseFood, parseExercise, parseCRM, type ParsedCRMAdd, type ParsedCRMInteraction, type ParsedCRMFollowup } from '@/lib/ai-parser'
 import {
   getUserByTelegramId,
   saveFoodLog,
@@ -14,6 +14,12 @@ import {
   clearLastCheckin,
   appendMenuOptions,
   getFoodPreferences,
+  findCRMPerson,
+  addCRMPerson,
+  logCRMInteraction,
+  addCRMFollowup,
+  getCRMFollowupsDue,
+  getCRMOverdueContacts,
 } from '@/lib/db'
 import { buildFoodReply, buildExerciseReply, buildDailySummary } from '@/lib/progress'
 import { generateMenuOptions, formatMenuMessage, buildShoppingList } from '@/lib/ai-generators'
@@ -202,6 +208,24 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true })
   }
 
+  if (intent === 'crm') {
+    // Quick query shortcuts — no parse needed
+    if (['crm', 'contacts', 'networking', 'who should i follow up with', 'follow ups', 'followups'].includes(lower)) {
+      const reply = await buildCRMSummary()
+      await sendMessage(chatId, reply)
+      return NextResponse.json({ ok: true })
+    }
+
+    try {
+      const parsed = await parseCRM(text)
+      const reply = await handleCRMAction(parsed)
+      await sendMessage(chatId, reply)
+    } catch {
+      await sendMessage(chatId, 'Got it — try:\n• "Add Sarah Chen, partner at a16z"\n• "Talked to John about Series A"\n• "Follow up with Mike about intro by Friday"')
+    }
+    return NextResponse.json({ ok: true })
+  }
+
   await sendMessage(chatId, 'Got it! Log food: "2 eggs toast". Log exercise: "15 min pushups". Reply HELP anytime.')
   return NextResponse.json({ ok: true })
 }
@@ -243,6 +267,85 @@ function parseMenuPicks(text: string, max: number = 5): number[] | null {
   const picks = numbers.map(Number).filter((n) => n >= 1 && n <= max)
   const distinct = Array.from(new Set(picks))
   return distinct.length === 3 ? distinct : null
+}
+
+async function handleCRMAction(parsed: Awaited<ReturnType<typeof parseCRM>>): Promise<string> {
+  if (parsed.action === 'add_person') {
+    const p = parsed as ParsedCRMAdd
+    const existing = await findCRMPerson(p.name)
+    if (existing) {
+      return `${existing.name} is already in your contacts${existing.company ? ` (${existing.company})` : ''}. Reply "Talked to ${existing.name} about..." to log an interaction.`
+    }
+    const person = await addCRMPerson({
+      name: p.name,
+      company: p.company,
+      role: p.role,
+      relationship_type: p.relationship_type,
+      notes: p.notes,
+    })
+    const parts = [person.name]
+    if (person.role) parts.push(person.role)
+    if (person.company) parts.push(`at ${person.company}`)
+    return `Added ${parts.join(', ')} to your CRM. ✓\nSay "Follow up with ${person.name} about..." to set a reminder.`
+  }
+
+  if (parsed.action === 'log_interaction') {
+    const p = parsed as ParsedCRMInteraction
+    const person = await findCRMPerson(p.person_name)
+    if (!person) {
+      return `I don't have ${p.person_name} in your contacts. Say "Add ${p.person_name}, [company]" first.`
+    }
+    await logCRMInteraction({ person_id: person.id, type: p.interaction_type, notes: p.notes })
+    return `Logged: ${p.interaction_type} with ${person.name}${p.notes ? ` — ${p.notes}` : ''}. ✓\nLast contact updated to today.`
+  }
+
+  if (parsed.action === 'add_followup') {
+    const p = parsed as ParsedCRMFollowup
+    const person = await findCRMPerson(p.person_name)
+    if (!person) {
+      return `I don't have ${p.person_name} in your contacts. Add them first: "Add ${p.person_name}, [company]".`
+    }
+    await addCRMFollowup({ person_id: person.id, description: p.description, due_date: p.due_date })
+    const due = p.due_date ? ` by ${p.due_date}` : ''
+    return `Follow-up set: ${p.description} with ${person.name}${due}. ✓`
+  }
+
+  return 'Got it!'
+}
+
+async function buildCRMSummary(): Promise<string> {
+  const [followups, overdue] = await Promise.all([
+    getCRMFollowupsDue(),
+    getCRMOverdueContacts(30),
+  ])
+
+  const lines: string[] = ['*Your People*\n']
+
+  if (followups.length > 0) {
+    lines.push('*Follow up:*')
+    for (const f of followups) {
+      const due = f.due_date ? ` (${f.due_date})` : ''
+      const co = f.company ? ` · ${f.company}` : ''
+      lines.push(`• ${f.name}${co}${due}: ${f.description}`)
+    }
+    lines.push('')
+  }
+
+  if (overdue.length > 0) {
+    lines.push('*Reach out:*')
+    for (const c of overdue) {
+      const co = c.company ? ` · ${c.company}` : ''
+      const when = c.last_contact_date ? `last: ${c.last_contact_date}` : 'never contacted'
+      lines.push(`• ${c.name}${co} (${when})`)
+    }
+    lines.push('')
+  }
+
+  if (followups.length === 0 && overdue.length === 0) {
+    lines.push("You're all caught up. 🎉")
+  }
+
+  return lines.join('\n')
 }
 
 async function handleSimpleResponse(

@@ -411,3 +411,128 @@ export async function setWindDownConfirmed(
     { onConflict: 'user_id,date' }
   )
 }
+
+// ============================================================================
+// Personal CRM
+// ============================================================================
+
+export interface CRMPerson {
+  id: string
+  name: string
+  company: string | null
+  role: string | null
+  relationship_type: string | null
+  last_contact_date: string | null
+}
+
+export async function findCRMPerson(nameQuery: string): Promise<CRMPerson | null> {
+  const { data } = await db()
+    .from('crm_people')
+    .select('id, name, company, role, relationship_type, last_contact_date')
+    .ilike('name', `%${nameQuery}%`)
+    .limit(1)
+    .single()
+  return data ?? null
+}
+
+export async function addCRMPerson(person: {
+  name: string
+  company?: string | null
+  role?: string | null
+  relationship_type?: string | null
+  notes?: string | null
+}): Promise<CRMPerson> {
+  const { data, error } = await db()
+    .from('crm_people')
+    .insert({ ...person, last_contact_date: new Date().toISOString().split('T')[0] })
+    .select('id, name, company, role, relationship_type, last_contact_date')
+    .single()
+  if (error) throw error
+  return data
+}
+
+export async function logCRMInteraction(interaction: {
+  person_id: string
+  type: string
+  notes?: string | null
+}): Promise<void> {
+  const today = new Date().toISOString().split('T')[0]
+  await Promise.all([
+    db().from('crm_interactions').insert({ ...interaction, date: today }),
+    db().from('crm_people').update({ last_contact_date: today }).eq('id', interaction.person_id),
+  ])
+}
+
+export async function addCRMFollowup(followup: {
+  person_id: string
+  description: string
+  due_date?: string | null
+}): Promise<void> {
+  await db().from('crm_followups').insert({ ...followup, status: 'pending' })
+}
+
+export async function getCRMFollowupsDue(): Promise<Array<{
+  id: string
+  name: string
+  company: string | null
+  description: string
+  due_date: string | null
+}>> {
+  const in7Days = new Date()
+  in7Days.setDate(in7Days.getDate() + 7)
+  const cutoff = in7Days.toISOString().split('T')[0]
+
+  const { data } = await db()
+    .from('crm_followups')
+    .select('id, description, due_date, crm_people(name, company)')
+    .eq('status', 'pending')
+    .lte('due_date', cutoff)
+    .order('due_date', { ascending: true })
+    .limit(10)
+
+  return (data ?? []).map((row) => {
+    const person = Array.isArray(row.crm_people) ? row.crm_people[0] : row.crm_people
+    return {
+      id: row.id,
+      name: (person as { name: string } | null)?.name ?? 'Unknown',
+      company: (person as { company: string | null } | null)?.company ?? null,
+      description: row.description,
+      due_date: row.due_date,
+    }
+  })
+}
+
+export async function getCRMOverdueContacts(days = 30): Promise<Array<{
+  id: string
+  name: string
+  company: string | null
+  last_contact_date: string | null
+}>> {
+  const cutoff = new Date()
+  cutoff.setDate(cutoff.getDate() - days)
+  const cutoffStr = cutoff.toISOString().split('T')[0]
+
+  const { data } = await db()
+    .from('crm_people')
+    .select('id, name, company, last_contact_date')
+    .or(`last_contact_date.lte.${cutoffStr},last_contact_date.is.null`)
+    .order('last_contact_date', { ascending: true, nullsFirst: true })
+    .limit(10)
+
+  return data ?? []
+}
+
+export async function getCRMPeople(): Promise<CRMPerson[]> {
+  const { data } = await db()
+    .from('crm_people')
+    .select('id, name, company, role, relationship_type, last_contact_date')
+    .order('name', { ascending: true })
+  return data ?? []
+}
+
+export async function completeCRMFollowup(followupId: string): Promise<void> {
+  await db()
+    .from('crm_followups')
+    .update({ status: 'completed' })
+    .eq('id', followupId)
+}
