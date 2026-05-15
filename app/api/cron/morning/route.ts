@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getAllUsers } from '@/lib/db'
+import { getAllUsers, getTopContactsToReachOut } from '@/lib/db'
 import { sendMessage } from '@/lib/telegram'
 import {
   fetchOuraSleep,
@@ -36,7 +36,9 @@ export async function GET(req: NextRequest) {
       // Persist snapshot regardless of whether we send a message
       await saveWearableData(u.id, today, oura, whoop)
 
-      const msg = formatWearableMessage(u.name, oura, whoop)
+      const wearableMsg = formatWearableMessage(u.name, oura, whoop)
+      const nudge = await buildNetworkNudge()
+      const msg = nudge ? `${wearableMsg}\n\n${nudge}` : wearableMsg
       await sendMessage(u.telegram_chat_id!, msg)
 
       return { user: u.name, oura: !!oura, whoop: !!whoop }
@@ -44,4 +46,19 @@ export async function GET(req: NextRequest) {
   )
 
   return NextResponse.json({ sent: active.length, results })
+}
+
+async function buildNetworkNudge(): Promise<string | null> {
+  try {
+    const contacts = await getTopContactsToReachOut(3)
+    if (contacts.length === 0) return null
+    const lines = ['👥 *Reach out today:*']
+    for (const c of contacts) {
+      const co = c.company ? ` · ${c.company}` : ''
+      lines.push(`• ${c.name}${co} — ${c.reason}`)
+    }
+    return lines.join('\n')
+  } catch {
+    return null
+  }
 }

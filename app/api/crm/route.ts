@@ -7,6 +7,7 @@ import {
   logCRMInteraction,
   completeCRMFollowup,
   addCRMFollowup,
+  updateCRMPerson,
 } from '@/lib/db'
 
 function authCheck(req: NextRequest): boolean {
@@ -57,6 +58,13 @@ export async function POST(req: NextRequest) {
     const { person_id, description, due_date } = body
     if (!person_id || !description) return NextResponse.json({ error: 'person_id and description required' }, { status: 400 })
     await addCRMFollowup({ person_id, description, due_date })
+    return NextResponse.json({ ok: true })
+  }
+
+  if (action === 'update_person') {
+    const { person_id, ...updates } = body
+    if (!person_id) return NextResponse.json({ error: 'person_id required' }, { status: 400 })
+    await updateCRMPerson(person_id, updates)
     return NextResponse.json({ ok: true })
   }
 

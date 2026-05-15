@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { sendMessage, type TelegramUpdate } from '@/lib/telegram'
-import { detectIntent, parseFood, parseExercise, parseCRM, type ParsedCRMAdd, type ParsedCRMInteraction, type ParsedCRMFollowup } from '@/lib/ai-parser'
+import { detectIntent, parseFood, parseExercise, parseCRM, type ParsedCRMAdd, type ParsedCRMInteraction, type ParsedCRMFollowup, type ParsedCRMLookup } from '@/lib/ai-parser'
 import {
   getUserByTelegramId,
   saveFoodLog,
@@ -20,6 +20,8 @@ import {
   addCRMFollowup,
   getCRMFollowupsDue,
   getCRMOverdueContacts,
+  getCRMPersonWithHistory,
+  updateCRMPerson,
 } from '@/lib/db'
 import { buildFoodReply, buildExerciseReply, buildDailySummary } from '@/lib/progress'
 import { generateMenuOptions, formatMenuMessage, buildShoppingList } from '@/lib/ai-generators'
@@ -209,8 +211,8 @@ export async function POST(req: NextRequest) {
   }
 
   if (intent === 'crm') {
-    // Quick query shortcuts — no parse needed
-    if (['crm', 'contacts', 'networking', 'who should i follow up with', 'follow ups', 'followups'].includes(lower)) {
+    // Quick summary shortcuts
+    if (['crm', 'contacts', 'networking', 'network', 'who should i follow up with', 'follow ups', 'followups'].includes(lower)) {
       const reply = await buildCRMSummary()
       await sendMessage(chatId, reply)
       return NextResponse.json({ ok: true })
@@ -221,7 +223,7 @@ export async function POST(req: NextRequest) {
       const reply = await handleCRMAction(parsed)
       await sendMessage(chatId, reply)
     } catch {
-      await sendMessage(chatId, 'Got it — try:\n• "Add Sarah Chen, partner at a16z"\n• "Talked to John about Series A"\n• "Follow up with Mike about intro by Friday"')
+      await sendMessage(chatId, 'Got it — try:\n• "Grabbed coffee with Sarah Chen, partner at a16z, talked about getCNNCTD"\n• "Who is Sarah Chen?"\n• "Follow up with Mike about intro by Friday"')
     }
     return NextResponse.json({ ok: true })
   }
@@ -270,33 +272,110 @@ function parseMenuPicks(text: string, max: number = 5): number[] | null {
 }
 
 async function handleCRMAction(parsed: Awaited<ReturnType<typeof parseCRM>>): Promise<string> {
+  if (parsed.action === 'lookup') {
+    const p = parsed as ParsedCRMLookup
+    const result = await getCRMPersonWithHistory(p.person_name)
+    if (!result) return `No one named "${p.person_name}" in your contacts yet. Say "Add ${p.person_name}, [company]" to add them.`
+
+    const { person, interactions, followups } = result
+    const lines: string[] = []
+
+    const header = [person.name, person.role, person.company ? `@ ${person.company}` : null].filter(Boolean).join(' · ')
+    lines.push(`*${header}*`)
+
+    if (person.warmth) {
+      const dot = { hot: '🔴', warm: '🟢', cold: '🔵', dormant: '⚫' }[person.warmth] ?? '⚪'
+      const meta = [dot + ' ' + person.warmth, person.location, ...(person.tags ?? [])].filter(Boolean)
+      lines.push(meta.join(' · '))
+    }
+
+    if (person.bio) lines.push(`\n${person.bio}`)
+    if (person.how_we_met) lines.push(`\n_Met: ${person.how_we_met}_`)
+
+    if (interactions.length > 0) {
+      lines.push('\n*Recent:*')
+      for (const i of interactions.slice(0, 3)) {
+        const date = i.date.slice(0, 10)
+        lines.push(`• ${date} ${i.type}${i.notes ? ` — ${i.notes}` : ''}`)
+      }
+    }
+
+    if (followups.length > 0) {
+      lines.push('\n*Follow-ups:*')
+      for (const f of followups) {
+        const due = f.due_date ? ` (${f.due_date})` : ''
+        lines.push(`• ${f.description}${due}`)
+      }
+    }
+
+    if (!person.last_contact_date) {
+      lines.push('\n_Never contacted_')
+    } else {
+      const days = Math.floor((Date.now() - new Date(person.last_contact_date).getTime()) / 86400000)
+      lines.push(`\n_Last contact: ${days}d ago_`)
+    }
+
+    return lines.join('\n')
+  }
+
   if (parsed.action === 'add_person') {
     const p = parsed as ParsedCRMAdd
     const existing = await findCRMPerson(p.name)
     if (existing) {
-      return `${existing.name} is already in your contacts${existing.company ? ` (${existing.company})` : ''}. Reply "Talked to ${existing.name} about..." to log an interaction.`
+      return `${existing.name} is already in your contacts${existing.company ? ` (${existing.company})` : ''}. Say "Talked to ${existing.name} about..." to log an interaction.`
     }
     const person = await addCRMPerson({
       name: p.name,
       company: p.company,
       role: p.role,
       relationship_type: p.relationship_type,
-      notes: p.notes,
+      bio: p.bio,
+      tags: p.tags ?? [],
+      warmth: p.warmth ?? 'warm',
+      how_we_met: p.how_we_met,
+      location: p.location,
     })
     const parts = [person.name]
     if (person.role) parts.push(person.role)
-    if (person.company) parts.push(`at ${person.company}`)
-    return `Added ${parts.join(', ')} to your CRM. ✓\nSay "Follow up with ${person.name} about..." to set a reminder.`
+    if (person.company) parts.push(`@ ${person.company}`)
+    const tagStr = p.tags?.length ? ` [${p.tags.join(', ')}]` : ''
+    return `Added *${parts.join(' · ')}*${tagStr} ✓\n${p.bio ? `\n${p.bio}` : ''}\nSay "Follow up with ${person.name} about..." to set a reminder.`
   }
 
   if (parsed.action === 'log_interaction') {
     const p = parsed as ParsedCRMInteraction
     const person = await findCRMPerson(p.person_name)
     if (!person) {
-      return `I don't have ${p.person_name} in your contacts. Say "Add ${p.person_name}, [company]" first.`
+      return `I don't have ${p.person_name} in your contacts yet. Say "Add ${p.person_name}, [role] at [company]" first.`
     }
-    await logCRMInteraction({ person_id: person.id, type: p.interaction_type, notes: p.notes })
-    return `Logged: ${p.interaction_type} with ${person.name}${p.notes ? ` — ${p.notes}` : ''}. ✓\nLast contact updated to today.`
+
+    await logCRMInteraction({
+      person_id: person.id,
+      type: p.interaction_type,
+      notes: p.notes,
+      topics: p.topics ?? [],
+    })
+
+    if (p.bio_update) {
+      const newBio = person.bio ? `${person.bio} ${p.bio_update}` : p.bio_update
+      await updateCRMPerson(person.id, { bio: newBio })
+    }
+
+    const followupsCreated: string[] = []
+    for (const f of p.implicit_followups ?? []) {
+      await addCRMFollowup({ person_id: person.id, description: f.description, due_date: f.due_date })
+      const due = f.due_date ? ` (${f.due_date})` : ''
+      followupsCreated.push(`→ ${f.description}${due}`)
+    }
+
+    const co = person.company ? ` @ ${person.company}` : ''
+    const lines = [`Logged ${p.interaction_type} with *${person.name}*${co} ✓`]
+    if (p.notes) lines.push(p.notes)
+    if (followupsCreated.length > 0) {
+      lines.push('\n*Follow-ups created:*')
+      lines.push(...followupsCreated)
+    }
+    return lines.join('\n')
   }
 
   if (parsed.action === 'add_followup') {
@@ -307,7 +386,7 @@ async function handleCRMAction(parsed: Awaited<ReturnType<typeof parseCRM>>): Pr
     }
     await addCRMFollowup({ person_id: person.id, description: p.description, due_date: p.due_date })
     const due = p.due_date ? ` by ${p.due_date}` : ''
-    return `Follow-up set: ${p.description} with ${person.name}${due}. ✓`
+    return `Follow-up set with *${person.name}*: ${p.description}${due} ✓`
   }
 
   return 'Got it!'
@@ -319,10 +398,10 @@ async function buildCRMSummary(): Promise<string> {
     getCRMOverdueContacts(30),
   ])
 
-  const lines: string[] = ['*Your People*\n']
+  const lines: string[] = ['*Your Network*\n']
 
   if (followups.length > 0) {
-    lines.push('*Follow up:*')
+    lines.push('*Follow-ups due:*')
     for (const f of followups) {
       const due = f.due_date ? ` (${f.due_date})` : ''
       const co = f.company ? ` · ${f.company}` : ''
@@ -335,8 +414,10 @@ async function buildCRMSummary(): Promise<string> {
     lines.push('*Reach out:*')
     for (const c of overdue) {
       const co = c.company ? ` · ${c.company}` : ''
-      const when = c.last_contact_date ? `last: ${c.last_contact_date}` : 'never contacted'
-      lines.push(`• ${c.name}${co} (${when})`)
+      const days = c.last_contact_date
+        ? Math.floor((Date.now() - new Date(c.last_contact_date).getTime()) / 86400000) + 'd'
+        : 'never'
+      lines.push(`• ${c.name}${co} (${days})`)
     }
     lines.push('')
   }
@@ -345,6 +426,7 @@ async function buildCRMSummary(): Promise<string> {
     lines.push("You're all caught up. 🎉")
   }
 
+  lines.push('_Say "Who is [name]?" for full context on anyone._')
   return lines.join('\n')
 }
 

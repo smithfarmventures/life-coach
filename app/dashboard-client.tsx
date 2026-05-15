@@ -22,6 +22,29 @@ interface CRMPersonItem {
   id: string
   name: string
   company: string | null
+  role: string | null
+  relationship_type: string | null
+  last_contact_date: string | null
+  bio: string | null
+  tags: string[]
+  warmth: 'hot' | 'warm' | 'cold' | 'dormant'
+  how_we_met: string | null
+  location: string | null
+}
+
+interface CRMInteractionItem {
+  id: string
+  type: string
+  notes: string | null
+  topics: string[]
+  action_items: string[]
+  date: string
+}
+
+interface CRMFollowupItem {
+  id: string
+  description: string
+  due_date: string | null
 }
 
 export interface DashboardData {
@@ -606,6 +629,13 @@ function LogTab({ token, todayRaw }: { token: string; todayRaw: string }) {
 
 // ─── CRM Tab ─────────────────────────────────────────────────────────────────
 
+const WARMTH_DOT: Record<string, string> = { hot: '#ef4444', warm: '#22c55e', cold: '#3b82f6', dormant: '#94a3b8' }
+const WARMTH_LABEL: Record<string, string> = { hot: '🔴 Hot', warm: '🟢 Warm', cold: '🔵 Cold', dormant: '⚫ Dormant' }
+
+function WarmthDot({ warmth }: { warmth: string }) {
+  return <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: WARMTH_DOT[warmth] ?? '#94a3b8', marginRight: 6, flexShrink: 0 }} />
+}
+
 function CRMTab({ initialFollowups, initialOverdue, token }: {
   initialFollowups: CRMFollowup[]
   initialOverdue: CRMContact[]
@@ -614,22 +644,41 @@ function CRMTab({ initialFollowups, initialOverdue, token }: {
   const [followups, setFollowups] = useState(initialFollowups)
   const [overdue, setOverdue] = useState(initialOverdue)
   const [people, setPeople] = useState<CRMPersonItem[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
+  const [selectedPerson, setSelectedPerson] = useState<{
+    person: CRMPersonItem
+    interactions: CRMInteractionItem[]
+    followups: CRMFollowupItem[]
+  } | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [crmView, setCrmView] = useState<'overview' | 'people' | 'add'>('overview')
 
   const [showAddContact, setShowAddContact] = useState(false)
   const [showLogInteraction, setShowLogInteraction] = useState(false)
   const [showAddFollowup, setShowAddFollowup] = useState(false)
-
   const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   useEffect(() => {
     fetch(`/api/crm?token=${token}`)
       .then((r) => r.json())
       .then((d) => {
-        setPeople(d.people ?? [])
+        setPeople((d.people ?? []).map((p: CRMPersonItem) => ({ ...p, tags: p.tags ?? [], warmth: p.warmth ?? 'warm' })))
         setFollowups(d.followups ?? [])
         setOverdue(d.overdue ?? [])
       })
   }, [token])
+
+  async function loadPersonDetail(person: CRMPersonItem) {
+    setDetailLoading(true)
+    setSelectedPerson({ person, interactions: [], followups: [] })
+    const d = await fetch(`/api/crm/person?id=${person.id}`, { headers: { 'x-token': token } }).then(r => r.json())
+    setSelectedPerson({
+      person: { ...person, ...d.person },
+      interactions: d.interactions ?? [],
+      followups: d.followups ?? [],
+    })
+    setDetailLoading(false)
+  }
 
   async function postCRM(body: object) {
     const res = await fetch('/api/crm', {
@@ -642,14 +691,14 @@ function CRMTab({ initialFollowups, initialOverdue, token }: {
 
   async function refreshCRM() {
     const d = await fetch(`/api/crm?token=${token}`).then((r) => r.json())
-    setPeople(d.people ?? [])
+    setPeople((d.people ?? []).map((p: CRMPersonItem) => ({ ...p, tags: p.tags ?? [], warmth: p.warmth ?? 'warm' })))
     setFollowups(d.followups ?? [])
     setOverdue(d.overdue ?? [])
   }
 
   function flash(ok: boolean, text: string) {
     setActionMsg({ ok, text })
-    setTimeout(() => setActionMsg(null), 3000)
+    setTimeout(() => setActionMsg(null), 3500)
   }
 
   async function completeDone(followupId: string) {
@@ -658,72 +707,144 @@ function CRMTab({ initialFollowups, initialOverdue, token }: {
     if (!r.ok) { flash(false, r.error ?? 'Failed'); refreshCRM() }
   }
 
+  async function updateWarmth(personId: string, warmth: string) {
+    await postCRM({ action: 'update_person', person_id: personId, warmth })
+    setPeople(ps => ps.map(p => p.id === personId ? { ...p, warmth: warmth as CRMPersonItem['warmth'] } : p))
+    if (selectedPerson?.person.id === personId) {
+      setSelectedPerson(s => s ? { ...s, person: { ...s.person, warmth: warmth as CRMPersonItem['warmth'] } } : s)
+    }
+  }
+
   const inputS: React.CSSProperties = { width: '100%', padding: '9px 11px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 13, fontFamily: 'inherit', background: '#f8fafc', boxSizing: 'border-box' }
   const selectS: React.CSSProperties = { ...inputS, cursor: 'pointer' }
   const btnS: React.CSSProperties = { padding: '9px 18px', borderRadius: 8, border: 'none', background: 'var(--accent)', color: 'white', fontSize: 13, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer' }
   const btnGhostS: React.CSSProperties = { ...btnS, background: 'transparent', color: 'var(--accent)', border: '1px solid var(--accent)' }
 
-  return (
-    <div className="fade-up">
+  const filteredPeople = searchQuery.trim()
+    ? people.filter(p =>
+        p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (p.company ?? '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (p.tags ?? []).some(t => t.toLowerCase().includes(searchQuery.toLowerCase()))
+      )
+    : people
 
-      {/* Follow-ups due */}
-      <Card>
-        <SectionLabel>Follow-ups due</SectionLabel>
-        {followups.length === 0 ? (
-          <EmptyState icon="✅" text="No follow-ups due in the next 7 days" />
-        ) : (
-          <ul style={{ margin: '12px 0 0', padding: 0, listStyle: 'none' }}>
-            {followups.map((f) => (
-              <li key={f.id} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+  // ── Sub-nav ──
+  const subNav = (
+    <div style={{ display: 'flex', gap: 4, marginBottom: 14 }}>
+      {(['overview', 'people', 'add'] as const).map(v => (
+        <button key={v} onClick={() => setCrmView(v)} style={{
+          padding: '6px 14px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 500, fontFamily: 'inherit',
+          background: crmView === v ? 'var(--accent)' : '#f1f5f9',
+          color: crmView === v ? 'white' : 'var(--text-secondary)',
+        }}>
+          {v === 'overview' ? 'Overview' : v === 'people' ? `People (${people.length})` : 'Add / Log'}
+        </button>
+      ))}
+    </div>
+  )
+
+  // ── Detail panel ──
+  if (selectedPerson) {
+    const p = selectedPerson.person
+    const daysAgo = p.last_contact_date
+      ? Math.floor((Date.now() - new Date(p.last_contact_date).getTime()) / 86400000)
+      : null
+
+    return (
+      <div className="fade-up">
+        <button onClick={() => setSelectedPerson(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 13, color: 'var(--accent)', fontFamily: 'inherit', padding: '0 0 12px', display: 'block' }}>
+          ← Back to CRM
+        </button>
+        <Card>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+            <div>
+              <div style={{ fontSize: 17, fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>
+                {[p.role, p.company].filter(Boolean).join(' @ ')}
+              </div>
+            </div>
+            <select
+              value={p.warmth ?? 'warm'}
+              onChange={e => updateWarmth(p.id, e.target.value)}
+              style={{ fontSize: 12, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: '#f8fafc', cursor: 'pointer', fontFamily: 'inherit' }}
+            >
+              {(['hot', 'warm', 'cold', 'dormant'] as const).map(w => (
+                <option key={w} value={w}>{WARMTH_LABEL[w]}</option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
+            {(p.tags ?? []).map(t => (
+              <span key={t} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 20, background: '#f1f5f9', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}>{t}</span>
+            ))}
+            {p.location && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>📍 {p.location}</span>}
+          </div>
+
+          {p.bio && <p style={{ fontSize: 13, color: 'var(--text-primary)', margin: '12px 0 0', lineHeight: 1.5 }}>{p.bio}</p>}
+          {p.how_we_met && <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '8px 0 0' }}>Met: {p.how_we_met}</p>}
+          <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '8px 0 0' }}>
+            {daysAgo !== null ? `Last contact: ${daysAgo === 0 ? 'today' : `${daysAgo}d ago`}` : 'Never contacted'}
+          </p>
+        </Card>
+
+        {detailLoading && <p style={{ textAlign: 'center', fontSize: 13, color: 'var(--text-muted)', padding: 16 }}>Loading history…</p>}
+
+        {selectedPerson.followups.length > 0 && (
+          <Card>
+            <SectionLabel>Pending follow-ups</SectionLabel>
+            <ul style={{ margin: '10px 0 0', padding: 0, listStyle: 'none' }}>
+              {selectedPerson.followups.map(f => (
+                <li key={f.id} style={{ padding: '8px 0', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
                   <div>
-                    <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)' }}>
-                      {f.name}{f.company ? <span style={{ fontWeight: 400, color: 'var(--text-secondary)' }}> · {f.company}</span> : null}
-                    </span>
-                    {f.due_date && <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 6 }}>{f.due_date}</span>}
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{f.description}</div>
+                    <div style={{ fontSize: 13, color: 'var(--text-primary)' }}>{f.description}</div>
+                    {f.due_date && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>Due {f.due_date}</div>}
                   </div>
-                  <button
-                    onClick={() => completeDone(f.id)}
-                    style={{ flexShrink: 0, padding: '4px 10px', borderRadius: 6, border: '1px solid #bbf7d0', background: '#f0fdf4', color: '#15803d', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer' }}
-                  >
+                  <button onClick={async () => {
+                    await postCRM({ action: 'complete_followup', followup_id: f.id })
+                    setSelectedPerson(s => s ? { ...s, followups: s.followups.filter(x => x.id !== f.id) } : s)
+                    setFollowups(fs => fs.filter(x => x.id !== f.id))
+                  }} style={{ flexShrink: 0, padding: '3px 8px', borderRadius: 6, border: '1px solid #bbf7d0', background: '#f0fdf4', color: '#15803d', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer' }}>
                     Done ✓
                   </button>
-                </div>
-              </li>
-            ))}
-          </ul>
+                </li>
+              ))}
+            </ul>
+          </Card>
         )}
-      </Card>
 
-      {/* Reach out */}
-      <Card>
-        <SectionLabel>Reach out</SectionLabel>
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '4px 0 8px' }}>No contact in 30+ days</p>
-        {overdue.length === 0 ? (
-          <EmptyState icon="🎉" text="You&apos;re all caught up" />
-        ) : (
-          <ul style={{ margin: '8px 0 0', padding: 0, listStyle: 'none' }}>
-            {overdue.map((c) => (
-              <li key={c.id} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
-                <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)' }}>
-                  {c.name}{c.company ? <span style={{ fontWeight: 400, color: 'var(--text-secondary)' }}> · {c.company}</span> : null}
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                  {c.last_contact_date ? `Last contact: ${c.last_contact_date}` : 'Never contacted'}
-                </div>
-              </li>
-            ))}
-          </ul>
+        {selectedPerson.interactions.length > 0 && (
+          <Card>
+            <SectionLabel>Interaction history</SectionLabel>
+            <ul style={{ margin: '10px 0 0', padding: 0, listStyle: 'none' }}>
+              {selectedPerson.interactions.map(i => (
+                <li key={i.id} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{i.type}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{i.date.slice(0, 10)}</span>
+                  </div>
+                  {i.notes && <div style={{ fontSize: 13, color: 'var(--text-primary)', marginTop: 3 }}>{i.notes}</div>}
+                  {(i.topics ?? []).length > 0 && (
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
+                      {i.topics.map(t => <span key={t} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 10, background: '#eff6ff', color: '#3b82f6' }}>{t}</span>)}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </Card>
         )}
-      </Card>
 
-      {/* Action buttons */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-        <button onClick={() => { setShowAddContact((v) => !v); setShowLogInteraction(false); setShowAddFollowup(false) }} style={showAddContact ? btnS : btnGhostS}>+ Add contact</button>
-        <button onClick={() => { setShowLogInteraction((v) => !v); setShowAddContact(false); setShowAddFollowup(false) }} style={showLogInteraction ? btnS : btnGhostS}>+ Log interaction</button>
-        <button onClick={() => { setShowAddFollowup((v) => !v); setShowAddContact(false); setShowLogInteraction(false) }} style={showAddFollowup ? btnS : btnGhostS}>+ Add follow-up</button>
+        {selectedPerson.interactions.length === 0 && !detailLoading && (
+          <Card><EmptyState icon="💬" text="No interactions logged yet — tell Telegram about your conversations" /></Card>
+        )}
       </div>
+    )
+  }
+
+  return (
+    <div className="fade-up">
+      {subNav}
 
       {actionMsg && (
         <div style={{ marginBottom: 12, padding: '10px 14px', borderRadius: 8, background: actionMsg.ok ? '#f0fdf4' : '#fef2f2', border: `1px solid ${actionMsg.ok ? '#bbf7d0' : '#fecaca'}`, fontSize: 13, color: actionMsg.ok ? '#166534' : '#991b1b' }}>
@@ -731,43 +852,186 @@ function CRMTab({ initialFollowups, initialOverdue, token }: {
         </div>
       )}
 
-      {/* Add contact form */}
-      {showAddContact && (
-        <AddContactForm
-          inputS={inputS} btnS={btnS}
-          onSave={async (fields) => {
-            const r = await postCRM({ action: 'add_person', ...fields })
-            if (r.ok) { flash(true, `${fields.name} added`); setShowAddContact(false); refreshCRM() }
-            else flash(false, r.error ?? 'Failed')
-          }}
-          onCancel={() => setShowAddContact(false)}
-        />
+      {/* ── OVERVIEW ── */}
+      {crmView === 'overview' && (
+        <>
+          <Card>
+            <SectionLabel>Follow-ups due</SectionLabel>
+            {followups.length === 0 ? (
+              <EmptyState icon="✅" text="No follow-ups due in the next 7 days" />
+            ) : (
+              <ul style={{ margin: '12px 0 0', padding: 0, listStyle: 'none' }}>
+                {followups.map((f) => (
+                  <li key={f.id} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                      <div>
+                        <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)' }}>
+                          {f.name}{f.company ? <span style={{ fontWeight: 400, color: 'var(--text-secondary)' }}> · {f.company}</span> : null}
+                        </span>
+                        {f.due_date && <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 6 }}>{f.due_date}</span>}
+                        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{f.description}</div>
+                      </div>
+                      <button onClick={() => completeDone(f.id)} style={{ flexShrink: 0, padding: '4px 10px', borderRadius: 6, border: '1px solid #bbf7d0', background: '#f0fdf4', color: '#15803d', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer' }}>
+                        Done ✓
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+
+          <Card>
+            <SectionLabel>Reach out</SectionLabel>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '4px 0 8px' }}>No contact in 30+ days</p>
+            {overdue.length === 0 ? (
+              <EmptyState icon="🎉" text="You're all caught up" />
+            ) : (
+              <ul style={{ margin: '8px 0 0', padding: 0, listStyle: 'none' }}>
+                {overdue.map((c) => {
+                  const person = people.find(p => p.id === c.id)
+                  const days = c.last_contact_date
+                    ? Math.floor((Date.now() - new Date(c.last_contact_date).getTime()) / 86400000)
+                    : null
+                  return (
+                    <li key={c.id} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9', cursor: 'pointer' }} onClick={() => person && loadPersonDetail(person)}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        {person && <WarmthDot warmth={person.warmth} />}
+                        <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)' }}>
+                          {c.name}{c.company ? <span style={{ fontWeight: 400, color: 'var(--text-secondary)' }}> · {c.company}</span> : null}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                        {days !== null ? `${days}d since last contact` : 'Never contacted'}
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </Card>
+
+          {followups.length === 0 && overdue.length === 0 && people.length === 0 && (
+            <Card>
+              <p style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', padding: '8px 0', lineHeight: 1.6 }}>
+                Start tracking your network via Telegram:<br />
+                <span style={{ fontFamily: 'monospace', fontSize: 12 }}>"Grabbed coffee with Sarah Chen, partner at a16z"</span><br />
+                <span style={{ fontFamily: 'monospace', fontSize: 12 }}>"Who is Sarah Chen?"</span>
+              </p>
+            </Card>
+          )}
+        </>
       )}
 
-      {/* Log interaction form */}
-      {showLogInteraction && (
-        <LogInteractionForm
-          people={people} inputS={inputS} selectS={selectS} btnS={btnS}
-          onSave={async (fields) => {
-            const r = await postCRM({ action: 'log_interaction', ...fields })
-            if (r.ok) { flash(true, 'Interaction logged'); setShowLogInteraction(false); refreshCRM() }
-            else flash(false, r.error ?? 'Failed')
-          }}
-          onCancel={() => setShowLogInteraction(false)}
-        />
+      {/* ── PEOPLE ── */}
+      {crmView === 'people' && (
+        <>
+          <Card>
+            <input
+              type="text"
+              placeholder="Search by name, company, or tag…"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 13, fontFamily: 'inherit', background: '#f8fafc', boxSizing: 'border-box', outline: 'none' }}
+            />
+          </Card>
+
+          {filteredPeople.length === 0 ? (
+            <Card><EmptyState icon="👤" text={searchQuery ? 'No matches' : 'No contacts yet — add them via Telegram'} /></Card>
+          ) : (
+            <Card>
+              <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+                {filteredPeople.map((p) => {
+                  const days = p.last_contact_date
+                    ? Math.floor((Date.now() - new Date(p.last_contact_date).getTime()) / 86400000)
+                    : null
+                  return (
+                    <li
+                      key={p.id}
+                      onClick={() => loadPersonDetail(p)}
+                      style={{ padding: '12px 0', borderBottom: '1px solid #f1f5f9', cursor: 'pointer', display: 'flex', alignItems: 'flex-start', gap: 10 }}
+                    >
+                      <WarmthDot warmth={p.warmth} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+                          <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
+                          <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>{days !== null ? `${days}d` : 'never'}</span>
+                        </div>
+                        {(p.role || p.company) && (
+                          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {[p.role, p.company].filter(Boolean).join(' @ ')}
+                          </div>
+                        )}
+                        {(p.tags ?? []).length > 0 && (
+                          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>
+                            {p.tags.slice(0, 3).map(t => (
+                              <span key={t} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 10, background: '#f1f5f9', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}>{t}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            </Card>
+          )}
+        </>
       )}
 
-      {/* Add follow-up form */}
-      {showAddFollowup && (
-        <AddFollowupForm
-          people={people} inputS={inputS} selectS={selectS} btnS={btnS}
-          onSave={async (fields) => {
-            const r = await postCRM({ action: 'add_followup', ...fields })
-            if (r.ok) { flash(true, 'Follow-up added'); setShowAddFollowup(false); refreshCRM() }
-            else flash(false, r.error ?? 'Failed')
-          }}
-          onCancel={() => setShowAddFollowup(false)}
-        />
+      {/* ── ADD / LOG ── */}
+      {crmView === 'add' && (
+        <>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+            <button onClick={() => { setShowAddContact(v => !v); setShowLogInteraction(false); setShowAddFollowup(false) }} style={showAddContact ? btnS : btnGhostS}>+ Add contact</button>
+            <button onClick={() => { setShowLogInteraction(v => !v); setShowAddContact(false); setShowAddFollowup(false) }} style={showLogInteraction ? btnS : btnGhostS}>+ Log interaction</button>
+            <button onClick={() => { setShowAddFollowup(v => !v); setShowAddContact(false); setShowLogInteraction(false) }} style={showAddFollowup ? btnS : btnGhostS}>+ Add follow-up</button>
+          </div>
+
+          {showAddContact && (
+            <AddContactForm inputS={inputS} btnS={btnS}
+              onSave={async (fields) => {
+                const r = await postCRM({ action: 'add_person', ...fields })
+                if (r.ok) { flash(true, `${fields.name} added`); setShowAddContact(false); refreshCRM() }
+                else flash(false, r.error ?? 'Failed')
+              }}
+              onCancel={() => setShowAddContact(false)}
+            />
+          )}
+
+          {showLogInteraction && (
+            <LogInteractionForm people={people} inputS={inputS} selectS={selectS} btnS={btnS}
+              onSave={async (fields) => {
+                const r = await postCRM({ action: 'log_interaction', ...fields })
+                if (r.ok) { flash(true, 'Interaction logged'); setShowLogInteraction(false); refreshCRM() }
+                else flash(false, r.error ?? 'Failed')
+              }}
+              onCancel={() => setShowLogInteraction(false)}
+            />
+          )}
+
+          {showAddFollowup && (
+            <AddFollowupForm people={people} inputS={inputS} selectS={selectS} btnS={btnS}
+              onSave={async (fields) => {
+                const r = await postCRM({ action: 'add_followup', ...fields })
+                if (r.ok) { flash(true, 'Follow-up added'); setShowAddFollowup(false); refreshCRM() }
+                else flash(false, r.error ?? 'Failed')
+              }}
+              onCancel={() => setShowAddFollowup(false)}
+            />
+          )}
+
+          {!showAddContact && !showLogInteraction && !showAddFollowup && (
+            <Card>
+              <p style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.6, margin: 0 }}>
+                Or just text the bot naturally:<br />
+                <span style={{ fontFamily: 'monospace', fontSize: 12 }}>"Grabbed coffee with Mike Chen, GP at Benchmark, talked about Series A"</span><br />
+                <span style={{ fontFamily: 'monospace', fontSize: 12 }}>"Who is Mike Chen?"</span><br />
+                <span style={{ fontFamily: 'monospace', fontSize: 12 }}>"Follow up with Sarah about intro by Friday"</span>
+              </p>
+            </Card>
+          )}
+        </>
       )}
     </div>
   )

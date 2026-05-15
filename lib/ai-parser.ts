@@ -9,7 +9,11 @@ export interface ParsedCRMAdd {
   company: string | null
   role: string | null
   relationship_type: string | null
-  notes: string | null
+  bio: string | null
+  tags: string[]
+  warmth: 'hot' | 'warm' | 'cold' | 'dormant'
+  how_we_met: string | null
+  location: string | null
 }
 
 export interface ParsedCRMInteraction {
@@ -17,6 +21,9 @@ export interface ParsedCRMInteraction {
   person_name: string
   interaction_type: string
   notes: string | null
+  topics: string[]
+  bio_update: string | null
+  implicit_followups: Array<{ description: string; due_date: string | null }>
 }
 
 export interface ParsedCRMFollowup {
@@ -26,13 +33,21 @@ export interface ParsedCRMFollowup {
   due_date: string | null
 }
 
-export type ParsedCRM = ParsedCRMAdd | ParsedCRMInteraction | ParsedCRMFollowup
+export interface ParsedCRMLookup {
+  action: 'lookup'
+  person_name: string
+}
+
+export type ParsedCRM = ParsedCRMAdd | ParsedCRMInteraction | ParsedCRMFollowup | ParsedCRMLookup
 
 const CRM_KEYWORDS = [
   'add contact', 'new contact', 'met ', 'met with', 'just met',
   'talked to', 'spoke to', 'spoke with', 'called ', 'emailed ',
   'follow up with', 'follow-up with', 'reach out to', 'remind me to',
   'need to contact', 'who should i', 'my contacts', 'crm',
+  'who is ', 'tell me about ', 'what do i know about',
+  'grabbed coffee', 'had lunch', 'had dinner', 'had a call', 'had a meeting',
+  'caught up with', 'connected with', 'intro to', 'intro\'d',
 ]
 
 const FOOD_KEYWORDS = [
@@ -65,27 +80,33 @@ export function detectIntent(message: string): 'food' | 'exercise' | 'crm' | 'si
 export async function parseCRM(userMessage: string): Promise<ParsedCRM> {
   const today = new Date().toISOString().split('T')[0]
 
-  const prompt = `You are a CRM assistant. Parse this message and return ONLY valid JSON with no extra text.
+  const prompt = `You are a zero-friction CRM assistant. Parse this message and return ONLY valid JSON — no prose, no markdown.
 
 Today's date: ${today}
 User input: "${userMessage}"
 
-Determine which action this is and return the appropriate structure:
+Choose ONE action:
 
-1. Adding a new person — return:
-{"action":"add_person","name":"<full name>","company":"<company or null>","role":"<role/title or null>","relationship_type":"<investor|founder|advisor|friend|professional|family|other or null>","notes":"<context or null>"}
+1. Looking someone up ("who is X", "tell me about X") — return:
+{"action":"lookup","person_name":"<name>"}
 
-2. Logging an interaction (talked to, called, met with, emailed) — return:
-{"action":"log_interaction","person_name":"<name>","interaction_type":"<email|call|meeting|message|linkedin|event|other>","notes":"<what was discussed or null>"}
+2. Adding a new person — return:
+{"action":"add_person","name":"<full name>","company":"<company or null>","role":"<role/title or null>","relationship_type":"<investor|founder|operator|advisor|friend|family|biz-dev|media|other or null>","bio":"<1-2 sentence context summary or null>","tags":["<tag1>"],"warmth":"<hot|warm|cold|dormant — default warm>","how_we_met":"<context or null>","location":"<city or null>"}
 
-3. Adding a follow-up task — return:
+3. Logging an interaction (talked to, called, had coffee, grabbed lunch, met with, emailed, caught up) — return:
+{"action":"log_interaction","person_name":"<name>","interaction_type":"<email|call|meeting|coffee|lunch|dinner|message|linkedin|event|other>","notes":"<concise summary of what was discussed>","topics":["<topic1>","<topic2>"],"bio_update":"<new fact to remember about this person — job change, fundraising status, key interest — or null>","implicit_followups":[{"description":"<action item or commitment>","due_date":"<YYYY-MM-DD or null>"}]}
+
+Extract ALL commitments from the message as implicit_followups (e.g. "send intro by Friday" → followup with due_date; "reconnect in 2 weeks" → followup with calculated due_date). Empty array if none.
+
+4. Adding a follow-up task — return:
 {"action":"add_followup","person_name":"<name>","description":"<what to do>","due_date":"<YYYY-MM-DD or null>"}
 
-Pick the best action. If unclear, default to add_person.`
+If the message mentions an interaction AND follow-ups, choose log_interaction (implicit_followups handles the rest).
+If unclear between add_person and log_interaction, choose log_interaction.`
 
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
-    max_tokens: 256,
+    max_tokens: 512,
     messages: [{ role: 'user', content: prompt }],
   })
 
