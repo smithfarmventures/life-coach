@@ -29,6 +29,15 @@ export async function generateMenuOptions(
       ? `Recently suggested or already shown this week (do NOT repeat any of these): ${recentMenuNames.join(', ')}`
       : 'No recent menus to avoid.'
 
+  const ironBlock = prefs.household_health_notes
+    ? `\nHousehold health requirement:\n${prefs.household_health_notes}`
+    : `\nHousehold health requirement (CRITICAL — wife has iron-deficiency anemia, they share all meals):
+- Every option MUST pair a heme-iron source (red meat, dark poultry, or fish) OR iron-rich legumes/leafy greens with at least one high-vitamin-C vegetable (bell peppers, broccoli, Brussels sprouts, tomatoes, citrus) to maximise iron absorption.
+- Include at least 1 red-meat option (lean steak, ground beef, flank steak) across the ${count} options — heme iron from beef absorbs faster than fish iron.
+- Favour iron-boosting veg: spinach, broccoli, Brussels sprouts, bell peppers, sweet potato.
+- Avoid pairing heavy dairy (cream sauces, large amounts of cheese) as the dominant accompaniment — calcium inhibits iron absorption.
+- The "why" field should call out the iron + vitamin C benefit for options where it is a primary feature.`
+
   const prompt = `You are Andrew's personal nutritionist. Generate exactly ${count} dinner option${count === 1 ? '' : 's'} for the upcoming week (Mon–Thu home-cooked dinners, with leftovers for next-day lunch).
 
 Andrew's profile:
@@ -41,6 +50,7 @@ Andrew's profile:
 - Carb staples: ${prefs.carb_staples.join(', ')}
 - Cuisines he enjoys: ${prefs.cuisines.join(', ')}
 - Notes: ${prefs.notes}
+${ironBlock}
 
 ${recentBlock}
 

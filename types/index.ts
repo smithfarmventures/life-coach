@@ -125,6 +125,7 @@ export interface FoodPreferencesData {
   restrictions: string[]              // medical/dietary restrictions
   cooking_constraints: string         // e.g. "1 stove + 2 oven, set-it-and-forget-it"
   notes: string                       // any free-text extras
+  household_health_notes?: string     // household-level health constraints (e.g. wife's iron deficiency)
 }
 
 export interface WeeklyMenu {
